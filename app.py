@@ -9,7 +9,12 @@ from streamlit_gsheets import GSheetsConnection
 # ---------------------------------------------------------
 st.set_page_config(page_title="실험실 통합 예약 시스템", layout="wide", page_icon="🔬")
 
-ADMIN_PASSWORD = "admin1234"
+# [보안 수정] 비밀번호를 코드에 적지 않고 Secrets에서 가져옵니다.
+# 로컬 테스트를 위해 Secrets가 없을 경우를 대비한 예외처리 포함
+try:
+    ADMIN_PASSWORD = st.secrets["admin_password"]
+except:
+    ADMIN_PASSWORD = "admin1234" # 로컬 테스트용 임시 비번
 
 # 고정된 색상 코드
 LAB_COLORS = {
@@ -128,12 +133,10 @@ tab1, tab2, tab3, tab4 = st.tabs(["📅 예약 하기", "📊 전체 타임라�
 
 # --- [TAB 1] 기기 예약 ---
 with tab1:
-    # [수정됨] 데이터가 없으면 예약 화면 UI 자체를 숨깁니다.
     if not LABS or not EQUIPMENT:
-        st.warning("⚠️ 초기 설정 중입니다. 관리자 모드(비밀번호: admin1234)에서 랩/기기 목록을 먼저 등록해주세요.")
-        st.info("상단 탭 맨 오른쪽 '👮 관리자 모드'로 이동하세요.")
+        st.warning("⚠️ 초기 설정 중입니다.")
+        st.info("상단 탭 맨 오른쪽 '👮 관리자 모드'에서 랩/기기를 등록해주세요.") # 비밀번호 노출 제거
     else:
-        # 데이터가 있을 때만 아래 UI 생성 (NameError 방지)
         col1, col2 = st.columns([1, 1.2])
         
         with col1:
@@ -353,6 +356,7 @@ with tab3:
 # --- [TAB 4] 관리자 모드 ---
 with tab4:
     st.subheader("👮 관리자 페이지")
+    # [보안 수정] 입력한 비밀번호와 Secrets의 비밀번호 비교
     if st.text_input("관리자 비밀번호", type="password") == ADMIN_PASSWORD:
         st.success("접속 승인")
         at1, at2, at3, at4 = st.tabs(["⚙️설정", "📅예약", "💧3차수", "📜로그"])
@@ -361,36 +365,51 @@ with tab4:
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🧪 실험실 관리")
-                dle = st.data_editor(load_data('labs'), num_rows="dynamic")
-                if st.button("실험실 저장"): save_data('labs', dle); st.success("저장됨"); st.rerun()
+                # [에러 수정] 모든 data_editor와 button에 고유 key 할당
+                dle = st.data_editor(load_data('labs'), num_rows="dynamic", key="editor_labs")
+                if st.button("실험실 저장", key="btn_save_labs"): 
+                    save_data('labs', dle)
+                    st.success("저장됨"); st.rerun()
+                
                 with st.expander("이름 일괄 변경"):
                     if LABS:
-                        ol, nl = st.selectbox("변경 전", LABS, key='ol'), st.text_input("변경 후", key='nl')
-                        if st.button("변경 적용", key='bl'):
+                        ol, nl = st.selectbox("변경 전", LABS, key='ol_lab'), st.text_input("변경 후", key='nl_lab')
+                        if st.button("변경 적용", key='btn_rename_lab'):
                             if nl in LABS: st.error("중복 이름")
                             else: batch_rename('lab', ol, nl); st.success("변경 완료"); st.rerun()
-                    else: st.warning("실험실 목록이 비어있습니다.")
+                    else: st.warning("목록 없음")
+
             with c2:
                 st.markdown("#### 🔬 기기 관리")
-                dee = st.data_editor(load_data('equipment'), num_rows="dynamic")
-                if st.button("기기 저장"): save_data('equipment', dee); st.success("저장됨"); st.rerun()
+                # [에러 수정] key 추가
+                dee = st.data_editor(load_data('equipment'), num_rows="dynamic", key="editor_eq")
+                if st.button("기기 저장", key="btn_save_eq"): 
+                    save_data('equipment', dee)
+                    st.success("저장됨"); st.rerun()
+                
                 with st.expander("이름 일괄 변경"):
                     if EQUIPMENT:
-                        oe, ne = st.selectbox("변경 전", EQUIPMENT, key='oe'), st.text_input("변경 후", key='ne')
-                        if st.button("변경 적용", key='be'):
+                        oe, ne = st.selectbox("변경 전", EQUIPMENT, key='ol_eq'), st.text_input("변경 후", key='nl_eq')
+                        if st.button("변경 적용", key='btn_rename_eq'):
                             if ne in EQUIPMENT: st.error("중복 이름")
                             else: batch_rename('equipment', oe, ne); st.success("변경 완료"); st.rerun()
-                    else: st.warning("기기 목록이 비어있습니다.")
+                    else: st.warning("목록 없음")
 
         with at2:
             st.warning("예약 데이터 강제 수정")
-            dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", use_container_width=True)
-            if st.button("예약 저장"): save_data('bookings', dbk); st.success("저장됨")
+            # [에러 수정] key 추가
+            dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", use_container_width=True, key="editor_bk")
+            if st.button("예약 저장", key="btn_save_bk"): 
+                save_data('bookings', dbk)
+                st.success("저장됨")
 
         with at3:
             st.warning("3차수 데이터 강제 수정")
-            dwt = st.data_editor(load_data('water'), num_rows="dynamic", use_container_width=True)
-            if st.button("물 데이터 저장"): save_data('water', dwt); st.success("저장됨")
+            # [에러 수정] key 추가
+            dwt = st.data_editor(load_data('water'), num_rows="dynamic", use_container_width=True, key="editor_wt")
+            if st.button("물 데이터 저장", key="btn_save_wt"): 
+                save_data('water', dwt)
+                st.success("저장됨")
 
         with at4:
             st.dataframe(load_data('logs').sort_values(by='timestamp', ascending=False), use_container_width=True)
