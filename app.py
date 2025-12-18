@@ -9,18 +9,11 @@ from streamlit_gsheets import GSheetsConnection
 # ---------------------------------------------------------
 st.set_page_config(page_title="실험실 통합 예약 시스템", layout="wide", page_icon="🔬")
 
-# [핵심 수정] 비밀번호를 어디에 적었든 찾아내는 함수
-def get_password():
-    # 1. 최상위에 적었을 경우
-    if "admin_password" in st.secrets:
-        return st.secrets["admin_password"]
-    # 2. 실수로 [connections.gsheets] 아래에 적었을 경우 (현재 상황)
-    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-        if "admin_password" in st.secrets["connections"]["gsheets"]:
-            return st.secrets["connections"]["gsheets"]["admin_password"]
-    return "admin1234" # 비상용 기본값
-
-ADMIN_PASSWORD = get_password()
+# 비밀번호 가져오기
+try:
+    ADMIN_PASSWORD = st.secrets["admin_password"]
+except:
+    ADMIN_PASSWORD = "admin1234"
 
 LAB_COLORS = {
     'Lab1': '#1f77b4', 'Lab2': '#ff7f0e', 'Lab3': '#2ca02c', 
@@ -38,8 +31,7 @@ def load_data(sheet_name):
     conn = get_connection()
     try:
         df = conn.read(worksheet=sheet_name, ttl=0)
-        
-        # [핵심 수정] 데이터가 없거나 컬럼이 깨졌을 때 강제로 틀을 만들어줌 (KeyError 방지)
+        # 빈 데이터 방어 로직
         expected_cols = {
             'labs': ['name'],
             'equipment': ['name'],
@@ -48,22 +40,23 @@ def load_data(sheet_name):
             'logs': ['timestamp', 'action', 'user', 'details']
         }
         
-        # 빈 깡통이거나 필수 컬럼이 없으면 강제 생성
-        if df.empty or (sheet_name in expected_cols and expected_cols[sheet_name][0] not in df.columns):
+        if df.empty or len(df.columns) == 0:
             return pd.DataFrame(columns=expected_cols.get(sheet_name, []))
             
         return df.astype(str)
     except:
-        # 연결 에러 시 빈 DF 반환
         return pd.DataFrame()
 
 def save_data(sheet_name, df):
     conn = get_connection()
     try:
+        # [핵심 수정] 저장할 때 인덱스 충돌 방지를 위해 순수 데이터만 추출
+        # 빈 행(모든 값이 비어있는 행) 제거
+        df = df.dropna(how='all')
         conn.update(worksheet=sheet_name, data=df)
         st.cache_data.clear()
     except Exception as e:
-        st.error(f"저장 실패: {e}")
+        st.error(f"저장 오류: {e}")
 
 def add_log(action, user, details):
     try:
@@ -151,7 +144,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📅 예약 하기", "📊 전체 타임라�
 with tab1:
     if not LABS or not EQUIPMENT:
         st.warning("⚠️ 초기 설정 중입니다.")
-        st.info("상단 탭 맨 오른쪽 '👮 관리자 모드'에서 랩/기기를 등록해주세요.")
+        st.info("관리자 모드에서 랩과 기기를 먼저 추가해주세요.")
     else:
         col1, col2 = st.columns([1, 1.2])
         with col1:
@@ -204,7 +197,8 @@ with tab1:
 
         with col2:
             df_cur = load_data('bookings')
-            if not df_cur.empty: df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
+            if not df_cur.empty: 
+                df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
             
             st.markdown(f"### 📊 {date} <br> {eq_name} 점유 현황", unsafe_allow_html=True)
             chart_df = pd.DataFrame(columns=['Start', 'End', 'user_name', 'lab'])
@@ -364,7 +358,6 @@ with tab3:
 # --- [TAB 4] 관리자 모드 ---
 with tab4:
     st.subheader("👮 관리자 페이지")
-    # [비밀번호] Secrets 혹은 하드코딩된 값과 비교
     if st.text_input("관리자 비밀번호", type="password") == ADMIN_PASSWORD:
         st.success("접속 승인")
         at1, at2, at3, at4 = st.tabs(["⚙️설정", "📅예약", "💧3차수", "📜로그"])
@@ -373,7 +366,8 @@ with tab4:
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🧪 실험실 관리")
-                dle = st.data_editor(load_data('labs'), num_rows="dynamic", key="editor_labs")
+                # [핵심 수정] hide_index=True 추가
+                dle = st.data_editor(load_data('labs'), num_rows="dynamic", key="editor_labs", hide_index=True)
                 if st.button("실험실 저장", key="btn_save_labs"): 
                     save_data('labs', dle)
                     st.success("저장됨"); st.rerun()
@@ -388,7 +382,8 @@ with tab4:
 
             with c2:
                 st.markdown("#### 🔬 기기 관리")
-                dee = st.data_editor(load_data('equipment'), num_rows="dynamic", key="editor_eq")
+                # [핵심 수정] hide_index=True 추가
+                dee = st.data_editor(load_data('equipment'), num_rows="dynamic", key="editor_eq", hide_index=True)
                 if st.button("기기 저장", key="btn_save_eq"): 
                     save_data('equipment', dee)
                     st.success("저장됨"); st.rerun()
@@ -403,14 +398,14 @@ with tab4:
 
         with at2:
             st.warning("예약 데이터 강제 수정")
-            dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", use_container_width=True, key="editor_bk")
+            dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", use_container_width=True, key="editor_bk", hide_index=True)
             if st.button("예약 저장", key="btn_save_bk"): 
                 save_data('bookings', dbk)
                 st.success("저장됨")
 
         with at3:
             st.warning("3차수 데이터 강제 수정")
-            dwt = st.data_editor(load_data('water'), num_rows="dynamic", use_container_width=True, key="editor_wt")
+            dwt = st.data_editor(load_data('water'), num_rows="dynamic", use_container_width=True, key="editor_wt", hide_index=True)
             if st.button("물 데이터 저장", key="btn_save_wt"): 
                 save_data('water', dwt)
                 st.success("저장됨")
@@ -418,7 +413,7 @@ with tab4:
         with at4:
             df_log = load_data('logs')
             if not df_log.empty and 'timestamp' in df_log.columns:
-                st.dataframe(df_log.sort_values(by='timestamp', ascending=False), use_container_width=True)
+                st.dataframe(df_log.sort_values(by='timestamp', ascending=False), use_container_width=True, hide_index=True)
             else:
                 st.info("로그가 없습니다.")
 
