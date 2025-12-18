@@ -9,14 +9,12 @@ from streamlit_gsheets import GSheetsConnection
 # ---------------------------------------------------------
 st.set_page_config(page_title="실험실 통합 예약 시스템", layout="wide", page_icon="🔬")
 
-# [보안 수정] 비밀번호를 코드에 적지 않고 Secrets에서 가져옵니다.
-# 로컬 테스트를 위해 Secrets가 없을 경우를 대비한 예외처리 포함
+# 비밀번호 가져오기 (없으면 기본값)
 try:
     ADMIN_PASSWORD = st.secrets["admin_password"]
 except:
-    ADMIN_PASSWORD = "admin1234" # 로컬 테스트용 임시 비번
+    ADMIN_PASSWORD = "admin1234"
 
-# 고정된 색상 코드
 LAB_COLORS = {
     'Lab1': '#1f77b4', 'Lab2': '#ff7f0e', 'Lab3': '#2ca02c', 
     'Lab4': '#d62728', 'Lab5': '#9467bd'
@@ -30,17 +28,22 @@ def get_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_data(sheet_name):
+    """데이터를 불러오고, 비어있으면 강제로 컬럼을 생성하여 반환"""
     conn = get_connection()
     try:
         df = conn.read(worksheet=sheet_name, ttl=0)
-        if df.empty:
+        # 데이터프레임이 비어있거나 컬럼이 없는 경우를 대비
+        if df.empty or len(df.columns) == 0:
             if sheet_name == 'labs': return pd.DataFrame(columns=['name'])
             elif sheet_name == 'equipment': return pd.DataFrame(columns=['name'])
             elif sheet_name == 'bookings': return pd.DataFrame(columns=['id', 'user_name', 'lab', 'equipment', 'date', 'start_time', 'end_time', 'password'])
             elif sheet_name == 'water': return pd.DataFrame(columns=['date', 'user_name', 'lab', 'amount'])
             elif sheet_name == 'logs': return pd.DataFrame(columns=['timestamp', 'action', 'user', 'details'])
+        
+        # 모든 데이터를 문자열로 변환 (날짜/시간 오류 방지)
         return df.astype(str)
-    except:
+    except Exception:
+        # 연결 실패 시 빈 깡통 반환
         return pd.DataFrame()
 
 def save_data(sheet_name, df):
@@ -49,18 +52,25 @@ def save_data(sheet_name, df):
         conn.update(worksheet=sheet_name, data=df)
         st.cache_data.clear()
     except Exception as e:
-        st.error(f"저장 오류: {e}")
+        st.error(f"저장 중 오류가 발생했습니다: {e}")
 
 def add_log(action, user, details):
-    df_log = load_data('logs')
-    new_log = pd.DataFrame([{
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'action': action,
-        'user': user,
-        'details': details
-    }])
-    df_log = pd.concat([df_log, new_log], ignore_index=True)
-    save_data('logs', df_log)
+    try:
+        df_log = load_data('logs')
+        new_log = pd.DataFrame([{
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'action': action,
+            'user': user,
+            'details': details
+        }])
+        # 빈 데이터프레임일 경우 concat 에러 방지
+        if df_log.empty:
+            df_log = new_log
+        else:
+            df_log = pd.concat([df_log, new_log], ignore_index=True)
+        save_data('logs', df_log)
+    except:
+        pass # 로그 저장 실패로 메인 기능이 멈추지 않게 함
 
 def parse_time(time_str):
     if not time_str or len(time_str) != 4 or not time_str.isdigit(): return None
@@ -80,13 +90,14 @@ def check_overlap(df, date_str, eq_name, start_time, end_time, exclude_id=None):
     df_check = df.copy()
     if exclude_id: df_check = df_check[df_check['id'] != exclude_id]
     
-    df_check['start_time'] = df_check['start_time'].astype(str).str.slice(0, 5)
-    df_check['end_time'] = df_check['end_time'].astype(str).str.slice(0, 5)
-    
-    same_day = df_check[(df_check['date'] == date_str) & (df_check['equipment'] == eq_name)]
-    for idx, row in same_day.iterrows():
-        if (row['start_time'] < end_time) and (row['end_time'] > start_time):
-            return True, row['user_name']
+    if 'start_time' in df_check.columns:
+        df_check['start_time'] = df_check['start_time'].astype(str).str.slice(0, 5)
+        df_check['end_time'] = df_check['end_time'].astype(str).str.slice(0, 5)
+        
+        same_day = df_check[(df_check['date'] == date_str) & (df_check['equipment'] == eq_name)]
+        for idx, row in same_day.iterrows():
+            if (row['start_time'] < end_time) and (row['end_time'] > start_time):
+                return True, row['user_name']
     return False, ""
 
 def batch_rename(target_type, old_name, new_name):
@@ -134,8 +145,8 @@ tab1, tab2, tab3, tab4 = st.tabs(["📅 예약 하기", "📊 전체 타임라�
 # --- [TAB 1] 기기 예약 ---
 with tab1:
     if not LABS or not EQUIPMENT:
-        st.warning("⚠️ 초기 설정 중입니다.")
-        st.info("상단 탭 맨 오른쪽 '👮 관리자 모드'에서 랩/기기를 등록해주세요.") # 비밀번호 노출 제거
+        st.warning("⚠️ 초기 설정 중입니다. 랩/기기 목록이 없습니다.")
+        st.info("관리자 모드에서 랩과 기기를 먼저 추가해주세요.")
     else:
         col1, col2 = st.columns([1, 1.2])
         
@@ -191,7 +202,8 @@ with tab1:
 
         with col2:
             df_cur = load_data('bookings')
-            if not df_cur.empty: df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
+            if not df_cur.empty: 
+                df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
             
             st.markdown(f"### 📊 {date} <br> {eq_name} 점유 현황", unsafe_allow_html=True)
             
@@ -217,7 +229,6 @@ with tab1:
 
             st.divider()
             st.subheader(f"🔧 예약 관리 ({eq_name})")
-            st.caption("현재 시간 이후의 예약만 표시됩니다.")
             
             df_bk = load_data('bookings')
             if not df_bk.empty:
@@ -257,7 +268,8 @@ with tab2:
     ds = pd.to_datetime(f"{td} 00:00:00")
     de = pd.to_datetime(f"{td} 23:59:59")
     
-    if not df_v.empty: df_v = df_v[df_v['date'] == str(td)]
+    if not df_v.empty: 
+        df_v = df_v[df_v['date'] == str(td)]
     
     if not df_v.empty:
         df_v['viz_end'] = df_v['end_time'].replace("24:00", "23:59")
@@ -320,7 +332,8 @@ with tab3:
             if st.form_submit_button("저장"):
                 dfw = load_data('water')
                 neww = pd.DataFrame([{'date': datetime.now().strftime('%Y-%m-%d'), 'user_name': wn, 'lab': wl, 'amount': str(wa)}])
-                dfw = pd.concat([dfw, neww], ignore_index=True)
+                if dfw.empty: dfw = neww
+                else: dfw = pd.concat([dfw, neww], ignore_index=True)
                 save_data('water', dfw)
                 add_log("3차수", wn, f"{wa}L")
                 st.success("저장됨"); st.rerun()
@@ -356,7 +369,6 @@ with tab3:
 # --- [TAB 4] 관리자 모드 ---
 with tab4:
     st.subheader("👮 관리자 페이지")
-    # [보안 수정] 입력한 비밀번호와 Secrets의 비밀번호 비교
     if st.text_input("관리자 비밀번호", type="password") == ADMIN_PASSWORD:
         st.success("접속 승인")
         at1, at2, at3, at4 = st.tabs(["⚙️설정", "📅예약", "💧3차수", "📜로그"])
@@ -365,7 +377,6 @@ with tab4:
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🧪 실험실 관리")
-                # [에러 수정] 모든 data_editor와 button에 고유 key 할당
                 dle = st.data_editor(load_data('labs'), num_rows="dynamic", key="editor_labs")
                 if st.button("실험실 저장", key="btn_save_labs"): 
                     save_data('labs', dle)
@@ -381,7 +392,6 @@ with tab4:
 
             with c2:
                 st.markdown("#### 🔬 기기 관리")
-                # [에러 수정] key 추가
                 dee = st.data_editor(load_data('equipment'), num_rows="dynamic", key="editor_eq")
                 if st.button("기기 저장", key="btn_save_eq"): 
                     save_data('equipment', dee)
@@ -397,7 +407,6 @@ with tab4:
 
         with at2:
             st.warning("예약 데이터 강제 수정")
-            # [에러 수정] key 추가
             dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", use_container_width=True, key="editor_bk")
             if st.button("예약 저장", key="btn_save_bk"): 
                 save_data('bookings', dbk)
@@ -405,11 +414,14 @@ with tab4:
 
         with at3:
             st.warning("3차수 데이터 강제 수정")
-            # [에러 수정] key 추가
             dwt = st.data_editor(load_data('water'), num_rows="dynamic", use_container_width=True, key="editor_wt")
             if st.button("물 데이터 저장", key="btn_save_wt"): 
                 save_data('water', dwt)
                 st.success("저장됨")
 
         with at4:
-            st.dataframe(load_data('logs').sort_values(by='timestamp', ascending=False), use_container_width=True)
+            df_log = load_data('logs')
+            if not df_log.empty and 'timestamp' in df_log.columns:
+                st.dataframe(df_log.sort_values(by='timestamp', ascending=False), use_container_width=True)
+            else:
+                st.info("로그가 없습니다.")
