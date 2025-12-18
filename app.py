@@ -13,12 +13,10 @@ st.set_page_config(
     page_icon="🔬"
 )
 
-# [비밀번호] secrets 또는 기본값 (로컬 테스트용)
+# [비밀번호]
 def get_password():
-    # 1. 최상위
     if "admin_password" in st.secrets:
         return st.secrets["admin_password"]
-    # 2. connections 내부
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         if "admin_password" in st.secrets["connections"]["gsheets"]:
             return st.secrets["connections"]["gsheets"]["admin_password"]
@@ -27,16 +25,12 @@ def get_password():
 ADMIN_PASSWORD = get_password()
 
 # 색상 팔레트
-LAB_COLORS = {
-    'Lab1': '#1f77b4', 'Lab2': '#ff7f0e', 'Lab3': '#2ca02c', 
-    'Lab4': '#d62728', 'Lab5': '#9467bd'
-}
 def get_lab_scale(labs):
     if not labs: return alt.Scale(scheme='tableau20')
     return alt.Scale(domain=labs, scheme='tableau20')
 
 # ============================================================================
-# 2. 데이터 처리 엔진 (핵심: 클리닝 & 연결)
+# 2. 데이터 처리 엔진
 # ============================================================================
 
 @st.cache_resource
@@ -44,21 +38,10 @@ def get_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def clean_val(val):
-    """
-    [핵심] 데이터 클리닝
-    1. '1111.0' -> '1111' (비밀번호 오류 해결)
-    2. NaN/None -> '' (빈 값 처리)
-    """
+    """데이터 클리닝 (소수점 제거, 공백 제거)"""
     s = str(val).strip()
-    if s.lower() in ['nan', 'none', '', '<na>']: 
-        return ""
-    try:
-        # 숫자인 경우 소수점 제거 (.0 형태)
-        f = float(s)
-        if f.is_integer():
-            return str(int(f))
-    except:
-        pass
+    if s.lower() in ['nan', 'none', '', '<na>']: return ""
+    if s.endswith('.0'): return s[:-2]
     return s
 
 def get_empty_df(sheet_name):
@@ -71,21 +54,24 @@ def get_empty_df(sheet_name):
     }
     return pd.DataFrame(columns=cols.get(sheet_name, []))
 
-@st.cache_data(ttl=5) # 5초 캐싱 (빠른 반응성)
+@st.cache_data(ttl=5) 
 def load_data(sheet_name):
     conn = get_connection()
     try:
         df = conn.read(worksheet=sheet_name, ttl=0)
-        if df is None or df.empty or len(df.columns) == 0:
-            return get_empty_df(sheet_name)
+        if df is None or df.empty: return get_empty_df(sheet_name)
         
-        # 전체 데이터 강력 클리닝
+        # 전체 데이터 클리닝
         df = df.astype(str).applymap(clean_val)
         
         # 필수 컬럼 체크
         req = get_empty_df(sheet_name).columns
-        if not set(req).issubset(df.columns):
-            return get_empty_df(sheet_name)
+        if not set(req).issubset(df.columns): return get_empty_df(sheet_name)
+        
+        # 날짜 포맷 통일 (YYYY-MM-DD)
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df = df.dropna(subset=['date']) # 날짜 없는 행 제거
             
         return df
     except:
@@ -94,7 +80,6 @@ def load_data(sheet_name):
 def save_data(sheet_name, df):
     conn = get_connection()
     try:
-        # 저장 전 클리닝 및 인덱스 제거
         df = df.fillna('').astype(str).applymap(clean_val)
         conn.update(worksheet=sheet_name, data=df)
         st.cache_data.clear()
@@ -115,7 +100,7 @@ def add_log(action, user, details):
     except: pass
 
 # ============================================================================
-# 3. 비즈니스 로직
+# 3. 로직 함수
 # ============================================================================
 
 def parse_time(t):
@@ -134,39 +119,34 @@ def calculate_hours(s, e):
 def check_overlap(df, date_str, eq, start, end, exclude_id=None):
     if df.empty: return False, ""
     try:
-        # 본인 예약 제외 (수정 시)
         if exclude_id: df = df[df['id'] != exclude_id]
         
-        # 날짜 & 기기 필터링
         target = df[(df['date'] == date_str) & (df['equipment'] == eq)]
         if target.empty: return False, ""
         
         for _, r in target.iterrows():
             rs, re = r['start_time'][:5], r['end_time'][:5]
-            # 겹침 공식
             if rs < end and re > start:
                 return True, r['user_name']
         return False, ""
     except: return False, ""
 
 def batch_rename(target_type, old_name, new_name):
-    """
-    [기능 복구] 이름 변경 시 과거 데이터까지 싹 바꿔주는 함수
-    """
-    # 1. 마스터 목록 수정
+    # 최신 데이터 강제 로드
+    st.cache_data.clear()
+    
     sheet = 'labs' if target_type == 'lab' else 'equipment'
     df_master = load_data(sheet)
     
-    # 중복 체크
     if new_name in df_master['name'].values:
         return False, "❌ 이미 존재하는 이름입니다."
     
-    # 이름 변경
+    # 마스터 수정
     if old_name in df_master['name'].values:
         df_master.loc[df_master['name'] == old_name, 'name'] = new_name
         save_data(sheet, df_master)
     
-    # 2. 예약 내역(Bookings) 수정
+    # 예약 내역 수정
     df_bk = load_data('bookings')
     col = 'lab' if target_type == 'lab' else 'equipment'
     if not df_bk.empty and col in df_bk.columns:
@@ -174,7 +154,7 @@ def batch_rename(target_type, old_name, new_name):
             df_bk.loc[df_bk[col] == old_name, col] = new_name
             save_data('bookings', df_bk)
             
-    # 3. 3차수(Water) 수정 (실험실인 경우만)
+    # 3차수 수정
     if target_type == 'lab':
         df_wt = load_data('water')
         if not df_wt.empty and 'lab' in df_wt.columns:
@@ -200,7 +180,7 @@ st.title("🔬 실험실 공동 기기 예약 시스템")
 tab1, tab2, tab3, tab4 = st.tabs(["📅 예약 하기", "📊 전체 타임라인", "💧 3차수 사용량", "👮 관리자 모드"])
 
 # ----------------------------------------------------------------------------
-# TAB 1: 예약 하기 (입력 + 해당 기기 현황)
+# TAB 1: 예약 하기 (좌측: 입력 / 우측: 실시간 현황 및 리스트)
 # ----------------------------------------------------------------------------
 with tab1:
     if not LABS or not EQUIPMENT:
@@ -208,7 +188,7 @@ with tab1:
     else:
         col1, col2 = st.columns([1, 1.3])
         
-        # [왼쪽] 예약 입력
+        # [왼쪽] 예약 입력 폼
         with col1:
             st.subheader("📝 예약 작성")
             with st.form("booking_form"):
@@ -232,7 +212,6 @@ with tab1:
                         df_bk = load_data('bookings')
                         is_overnight = fe < fs
                         
-                        # 중복 체크 및 저장 로직
                         if is_overnight:
                             nd = u_date + timedelta(days=1)
                             ov1, u1 = check_overlap(df_bk, str(u_date), u_eq, fs, "24:00")
@@ -262,76 +241,84 @@ with tab1:
                                 add_log("예약", u_name, u_eq)
                                 st.success("✅ 예약 완료!"); st.rerun()
 
-        # [오른쪽] 기기별 현황 & 내 예약 관리
+        # [오른쪽] 기기별 현황 (즉시 표시)
         with col2:
             st.markdown(f"### 📊 현황: {u_eq} ({u_date})")
-            st.caption("👇 해당 기기의 **모든 예약**이 표시됩니다.")
             
+            # [기능 개선 1] 현재 선택된 날짜/기기의 모든 예약을 즉시 로드
             df_all = load_data('bookings')
-            # 날짜 & 기기로 필터링 (모든 사람의 예약 포함)
             df_viz = df_all[(df_all['date'] == str(u_date)) & (df_all['equipment'] == u_eq)].copy()
             
+            # 1. 타임라인 차트
             if not df_viz.empty:
                 df_viz['s_dt'] = pd.to_datetime(df_viz['date'] + ' ' + df_viz['start_time'].str[:5], format='%Y-%m-%d %H:%M')
                 df_viz['e_dt'] = pd.to_datetime(df_viz['date'] + ' ' + df_viz['end_time'].str[:5].replace("24:00","23:59"), format='%Y-%m-%d %H:%M')
                 
                 chart = alt.Chart(df_viz).mark_bar(cornerRadius=5).encode(
-                    x=alt.X('user_name', title='사용자'),
+                    x=alt.X('user_name', title='예약자'),
                     y=alt.Y('s_dt:T', title='시간', scale=alt.Scale(domain=[pd.to_datetime(f"{u_date} 00:00"), pd.to_datetime(f"{u_date} 23:59")])),
                     y2='e_dt:T',
                     color=alt.Color('lab', scale=lab_scale, title='실험실'),
                     tooltip=['user_name', 'lab', 'start_time', 'end_time']
-                ).properties(height=400)
+                ).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
+                
+                # [기능 개선 2] 다른 사람 예약 리스트 표시
+                st.markdown("#### 📋 전체 예약 리스트")
+                # 보여줄 컬럼만 선택해서 깔끔하게 표시
+                display_df = df_viz[['start_time', 'end_time', 'user_name', 'lab']].sort_values('start_time')
+                display_df.columns = ['시작', '종료', '예약자', '소속']
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+                
             else:
-                st.info("예약 내역이 없습니다.")
+                st.info("📌 예약된 일정이 없습니다. 바로 예약하세요!")
             
             st.divider()
-            st.subheader("🔧 내 예약 관리 (수정/삭제)")
-            my_pw = st.text_input("내 비밀번호 입력", type="password", key="my_pw_chk")
             
-            if my_pw:
-                # 비밀번호가 일치하는 예약만 찾기 (1111.0 문제 해결됨)
-                my_bk = df_all[df_all['password'] == my_pw]
-                
-                # 미래의 예약만 보여주기
-                valid_bk = []
-                now_dt = datetime.now()
-                for _, r in my_bk.iterrows():
-                    try:
-                        et = "23:59" if r['end_time'] == "24:00" else r['end_time'][:5]
-                        if datetime.strptime(f"{r['date']} {et}", "%Y-%m-%d %H:%M") >= now_dt:
-                            valid_bk.append(r)
-                    except: continue
-                
-                if valid_bk:
-                    for b in sorted(valid_bk, key=lambda x: (x['date'], x['start_time'])):
-                        with st.expander(f"📅 {b['date']} | {b['equipment']} | {b['start_time']}~{b['end_time']}"):
-                            c1, c2 = st.columns(2)
-                            new_s = c1.text_input("수정 시작", value=b['start_time'].replace(":",""), key=f"s_{b['id']}")
-                            new_e = c2.text_input("수정 종료", value=b['end_time'].replace(":",""), key=f"e_{b['id']}")
-                            
-                            b1, b2 = st.columns(2)
-                            if b1.button("수정 저장", key=f"mod_{b['id']}"):
-                                nfs, nfe = parse_time(new_s), parse_time(new_e)
-                                if nfs and nfe:
-                                    # 중복 체크 (내 아이디 제외)
-                                    ov, usr = check_overlap(df_all, b['date'], b['equipment'], nfs, nfe, exclude_id=b['id'])
-                                    if ov: st.error(f"충돌! ({usr})")
-                                    else:
-                                        df_all.loc[df_all['id']==b['id'], ['start_time','end_time']] = [nfs, nfe]
-                                        save_data('bookings', df_all)
-                                        st.success("수정됨!"); st.rerun()
-                                else: st.error("시간 오류")
+            # 3. 내 예약 관리 (수정/삭제)
+            st.subheader("🔧 내 예약 관리 (수정/삭제)")
+            with st.expander("내 예약 관리 열기"):
+                my_pw = st.text_input("비밀번호 확인", type="password", key="my_pw_chk")
+                if my_pw:
+                    my_bk = df_all[df_all['password'] == my_pw]
+                    valid_bk = []
+                    now_dt = datetime.now()
+                    
+                    for _, r in my_bk.iterrows():
+                        try:
+                            et = "23:59" if r['end_time'] == "24:00" else r['end_time'][:5]
+                            if datetime.strptime(f"{r['date']} {et}", "%Y-%m-%d %H:%M") >= now_dt:
+                                valid_bk.append(r)
+                        except: continue
+                    
+                    if valid_bk:
+                        for b in sorted(valid_bk, key=lambda x: (x['date'], x['start_time'])):
+                            with st.container(border=True):
+                                st.write(f"📅 **{b['date']}** | {b['equipment']} | {b['start_time']}~{b['end_time']}")
+                                c1, c2 = st.columns(2)
+                                new_s = c1.text_input("변경 시작", value=b['start_time'].replace(":",""), key=f"s_{b['id']}")
+                                new_e = c2.text_input("변경 종료", value=b['end_time'].replace(":",""), key=f"e_{b['id']}")
                                 
-                            if b2.button("삭제", key=f"del_{b['id']}"):
-                                save_data('bookings', df_all[df_all['id'] != b['id']])
-                                st.success("삭제됨!"); st.rerun()
-                else:
-                    st.info("수정 가능한 예약이 없습니다.")
+                                b1, b2 = st.columns(2)
+                                if b1.button("수정", key=f"mod_{b['id']}"):
+                                    nfs, nfe = parse_time(new_s), parse_time(new_e)
+                                    if nfs and nfe:
+                                        ov, usr = check_overlap(df_all, b['date'], b['equipment'], nfs, nfe, exclude_id=b['id'])
+                                        if ov: st.error(f"충돌! ({usr})")
+                                        else:
+                                            df_all.loc[df_all['id']==b['id'], ['start_time','end_time']] = [nfs, nfe]
+                                            save_data('bookings', df_all)
+                                            st.success("수정됨!"); st.rerun()
+                                    else: st.error("시간 오류")
+                                    
+                                if b2.button("삭제", key=f"del_{b['id']}"):
+                                    save_data('bookings', df_all[df_all['id'] != b['id']])
+                                    st.success("삭제됨!"); st.rerun()
+                    else:
+                        st.info("수정 가능한 예약이 없습니다.")
 
 # ----------------------------------------------------------------------------
-# TAB 2: 전체 타임라인 (복구됨)
+# TAB 2: 전체 타임라인
 # ----------------------------------------------------------------------------
 with tab2:
     st.subheader("🕑 기기별 24시간 현황 (전체)")
@@ -361,7 +348,7 @@ with tab2:
     st.divider()
     st.subheader("📈 통계")
     if EQUIPMENT:
-        s_eq = st.selectbox("기기 선택", EQUIPMENT, key="st_eq")
+        s_eq = st.selectbox("기기 선택", EQUIPMENT, key="stat_eq")
         df_st = df_all[df_all['equipment'] == s_eq].copy()
         if not df_st.empty:
             df_st['hrs'] = df_st.apply(lambda x: calculate_hours(x['start_time'], x['end_time']), axis=1)
@@ -384,7 +371,7 @@ with tab2:
                 st.altair_chart(bar, use_container_width=True)
 
 # ----------------------------------------------------------------------------
-# TAB 3: 3차수 (기존 유지)
+# TAB 3: 3차수
 # ----------------------------------------------------------------------------
 with tab3:
     c1, c2 = st.columns([1, 1.5])
@@ -413,7 +400,7 @@ with tab3:
             st.altair_chart(bar, use_container_width=True)
 
 # ----------------------------------------------------------------------------
-# TAB 4: 관리자 (일괄 변경 기능 강화)
+# TAB 4: 관리자
 # ----------------------------------------------------------------------------
 with tab4:
     st.subheader("👮 관리자")
