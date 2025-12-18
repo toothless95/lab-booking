@@ -4,10 +4,14 @@ from datetime import datetime, timedelta
 import altair as alt
 from streamlit_gsheets import GSheetsConnection
 
-# ---------------------------------------------------------
+# ============================================================================
 # 1. 설정 및 초기화
-# ---------------------------------------------------------
-st.set_page_config(page_title="실험실 통합 예약 시스템", layout="wide", page_icon="🔬")
+# ============================================================================
+st.set_page_config(
+    page_title="실험실 통합 예약 시스템", 
+    layout="wide", 
+    page_icon="🔬"
+)
 
 # [비밀번호]
 def get_password():
@@ -21,10 +25,6 @@ def get_password():
 ADMIN_PASSWORD = get_password()
 
 # 색상 팔레트
-LAB_COLORS = {
-    'Lab1': '#1f77b4', 'Lab2': '#ff7f0e', 'Lab3': '#2ca02c', 
-    'Lab4': '#d62728', 'Lab5': '#9467bd'
-}
 def get_lab_scale(labs):
     if not labs: return alt.Scale(scheme='tableau20')
     return alt.Scale(domain=labs, scheme='tableau20')
