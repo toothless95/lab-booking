@@ -30,7 +30,7 @@ def get_lab_scale(labs):
     return alt.Scale(domain=labs, scheme='tableau20')
 
 # ---------------------------------------------------------
-# 2. 구글 시트 데이터 처리 함수 (엔진 교체)
+# 2. 구글 시트 데이터 처리 함수
 # ---------------------------------------------------------
 @st.cache_resource
 def get_connection():
@@ -157,7 +157,7 @@ EQUIPMENT = df_eq_list['name'].tolist() if not df_eq_list.empty else []
 lab_scale = get_lab_scale(LABS)
 
 # ---------------------------------------------------------
-# 3. UI 및 기능 구현 (사용자 기존 UI 100% 복원)
+# 3. UI 및 기능 구현
 # ---------------------------------------------------------
 
 st.title("🔬 5개 실험실 공동 기기 예약 시스템")
@@ -221,13 +221,15 @@ with tab1:
                                 st.success("예약 완료!"); st.rerun()
 
     with col2:
-        # [복원] 기존 UI: 해당 기기의 점유 현황만 표시
         df_cur = load_data('bookings')
-        if not df_cur.empty: df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
+        if not df_cur.empty: 
+            df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
         
         st.markdown(f"### 📊 {date} <br> {eq_name} 점유 현황", unsafe_allow_html=True)
         
-        chart_df = pd.DataFrame(columns=['Start', 'End', 'user_name', 'lab'])
+        # [수정된 부분] 빈 데이터프레임일 때도 필요한 컬럼을 모두 정의하여 에러 방지
+        chart_df = pd.DataFrame(columns=['Start', 'End', 'user_name', 'lab', 'start_time', 'end_time'])
+        
         if not df_cur.empty:
             chart_df = df_cur.copy()
             chart_df['start_time'] = chart_df['start_time'].astype(str).str.slice(0, 5)
@@ -269,7 +271,6 @@ with tab1:
                     with st.expander(f"📅 {r['date']} | 👤 {r['user_name']} | ⏰ {dt_txt}"):
                         st.write(f"🏢 **{r['lab']}**")
                         
-                        # [요청사항 반영] 수정 기능 추가 (UI는 유지하되 내부에 배치)
                         c_mod1, c_mod2 = st.columns(2)
                         new_s = c_mod1.text_input("수정 시작", value=r['start_time'].replace(":",""), key=f"s_{r['id']}")
                         new_e = c_mod2.text_input("수정 종료", value=r['end_time'].replace(":",""), key=f"e_{r['id']}")
@@ -282,7 +283,6 @@ with tab1:
                             if fs_n and fe_n:
                                 if str(ipw) == str(r['password']):
                                     df_all = load_data('bookings')
-                                    # 중복 체크 (내꺼 제외)
                                     ov, ur = check_overlap(df_all, r['date'], eq_name, fs_n, fe_n, exclude_id=r['id'])
                                     if ov: st.error(f"시간 충돌! ({ur})")
                                     else:
@@ -372,23 +372,23 @@ with tab3:
             wl = st.selectbox("실험실", LABS) if LABS else None
             wa = st.number_input("사용량 (L)", min_value=0.1, step=0.5)
             if st.form_submit_button("저장"):
-                dfw = load_data('water')
-                neww = pd.DataFrame([{'date': datetime.now().strftime('%Y-%m-%d'), 'user_name': wn, 'lab': wl, 'amount': str(wa)}])
-                dfw = pd.concat([dfw, neww], ignore_index=True)
-                save_data('water', dfw)
+                df_w = load_data('water')
+                new_w = pd.DataFrame([{'date': datetime.now().strftime('%Y-%m-%d'), 'user_name': wn, 'lab': wl, 'amount': str(wa)}])
+                df_w = pd.concat([df_w, new_w], ignore_index=True)
+                save_data('water', df_w)
                 add_log("3차수", wn, f"{wa}L")
                 st.success("저장됨"); st.rerun()
-        st.divider(); st.write("📋 최근 기록"); dfw = load_data('water')
-        if not dfw.empty: st.dataframe(dfw.tail(5), use_container_width=True, hide_index=True)
+        st.divider(); st.write("📋 최근 기록"); df_w = load_data('water')
+        if not df_w.empty: st.dataframe(df_w.tail(5), use_container_width=True, hide_index=True)
 
     with col2:
         st.subheader("📊 통계 대시보드")
-        if not dfw.empty:
-            dfw['amount'] = pd.to_numeric(dfw['amount'], errors='coerce')
-            dfw['mon'] = pd.to_datetime(dfw['date']).dt.strftime('%Y-%m')
+        if not df_w.empty:
+            df_w['amount'] = pd.to_numeric(df_w['amount'], errors='coerce')
+            df_w['mon'] = pd.to_datetime(df_w['date']).dt.strftime('%Y-%m')
             cm = datetime.now().strftime('%Y-%m')
             st.markdown(f"#### 📅 {cm} 점유율")
-            dftm = dfw[dfw['mon'] == cm]
+            dftm = dfw[dfw['mon'] == cm] if not dfw.empty else pd.DataFrame()
             if not dftm.empty:
                 ms = dftm.groupby('lab')['amount'].sum().reset_index()
                 ms['pct'] = ms['amount'] / ms['amount'].sum()
@@ -398,7 +398,7 @@ with tab3:
                 st.altair_chart(pie+txt, use_container_width=True)
             else: st.info("데이터 없음")
             st.divider(); st.markdown("#### 📈 월별 추이")
-            mst = dfw.groupby(['mon', 'lab'])['amount'].sum().reset_index()
+            mst = df_w.groupby(['mon', 'lab'])['amount'].sum().reset_index()
             mtot = mst.groupby('mon')['amount'].sum().reset_index()
             mtot.columns = ['mon', 'total']
             mst = pd.merge(mst, mtot, on='mon')
@@ -424,7 +424,7 @@ with tab4:
                     ol, nl = st.selectbox("변경 전", LABS, key='ol'), st.text_input("변경 후", key='nl')
                     if st.button("변경 적용", key='bl'):
                         suc, msg = batch_rename('lab', ol, nl)
-                        if suc: st.success(msg); st.rerun()
+                        if suc: st.success("변경 완료"); st.rerun()
                         else: st.error(msg)
             with c2:
                 st.markdown("#### 🔬 기기 관리")
@@ -434,17 +434,17 @@ with tab4:
                     oe, ne = st.selectbox("변경 전", EQUIPMENT, key='oe'), st.text_input("변경 후", key='ne')
                     if st.button("변경 적용", key='be'):
                         suc, msg = batch_rename('equipment', oe, ne)
-                        if suc: st.success(msg); st.rerun()
+                        if suc: st.success("변경 완료"); st.rerun()
                         else: st.error(msg)
 
         with at2:
             st.warning("예약 데이터 강제 수정")
-            dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", use_container_width=True, key="ed_bk", hide_index=True)
+            dbk = st.data_editor(load_data('bookings'), num_rows="dynamic", key="ed_bk", hide_index=True)
             if st.button("예약 저장", key="sv_bk"): save_data('bookings', dbk); st.success("저장됨")
 
         with at3:
             st.warning("3차수 데이터 강제 수정")
-            dwt = st.data_editor(load_data('water'), num_rows="dynamic", use_container_width=True, key="ed_wt", hide_index=True)
+            dwt = st.data_editor(load_data('water'), num_rows="dynamic", key="ed_wt", hide_index=True)
             if st.button("물 데이터 저장", key="sv_wt"): save_data('water', dwt); st.success("저장됨")
 
         with at4:
