@@ -9,11 +9,18 @@ from streamlit_gsheets import GSheetsConnection
 # ---------------------------------------------------------
 st.set_page_config(page_title="실험실 통합 예약 시스템", layout="wide", page_icon="🔬")
 
-# 비밀번호 가져오기 (없으면 기본값)
-try:
-    ADMIN_PASSWORD = st.secrets["admin_password"]
-except:
-    ADMIN_PASSWORD = "admin1234"
+# [핵심 수정] 비밀번호를 어디에 적었든 찾아내는 함수
+def get_password():
+    # 1. 최상위에 적었을 경우
+    if "admin_password" in st.secrets:
+        return st.secrets["admin_password"]
+    # 2. 실수로 [connections.gsheets] 아래에 적었을 경우 (현재 상황)
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        if "admin_password" in st.secrets["connections"]["gsheets"]:
+            return st.secrets["connections"]["gsheets"]["admin_password"]
+    return "admin1234" # 비상용 기본값
+
+ADMIN_PASSWORD = get_password()
 
 LAB_COLORS = {
     'Lab1': '#1f77b4', 'Lab2': '#ff7f0e', 'Lab3': '#2ca02c', 
@@ -28,22 +35,26 @@ def get_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def load_data(sheet_name):
-    """데이터를 불러오고, 비어있으면 강제로 컬럼을 생성하여 반환"""
     conn = get_connection()
     try:
         df = conn.read(worksheet=sheet_name, ttl=0)
-        # 데이터프레임이 비어있거나 컬럼이 없는 경우를 대비
-        if df.empty or len(df.columns) == 0:
-            if sheet_name == 'labs': return pd.DataFrame(columns=['name'])
-            elif sheet_name == 'equipment': return pd.DataFrame(columns=['name'])
-            elif sheet_name == 'bookings': return pd.DataFrame(columns=['id', 'user_name', 'lab', 'equipment', 'date', 'start_time', 'end_time', 'password'])
-            elif sheet_name == 'water': return pd.DataFrame(columns=['date', 'user_name', 'lab', 'amount'])
-            elif sheet_name == 'logs': return pd.DataFrame(columns=['timestamp', 'action', 'user', 'details'])
         
-        # 모든 데이터를 문자열로 변환 (날짜/시간 오류 방지)
+        # [핵심 수정] 데이터가 없거나 컬럼이 깨졌을 때 강제로 틀을 만들어줌 (KeyError 방지)
+        expected_cols = {
+            'labs': ['name'],
+            'equipment': ['name'],
+            'bookings': ['id', 'user_name', 'lab', 'equipment', 'date', 'start_time', 'end_time', 'password'],
+            'water': ['date', 'user_name', 'lab', 'amount'],
+            'logs': ['timestamp', 'action', 'user', 'details']
+        }
+        
+        # 빈 깡통이거나 필수 컬럼이 없으면 강제 생성
+        if df.empty or (sheet_name in expected_cols and expected_cols[sheet_name][0] not in df.columns):
+            return pd.DataFrame(columns=expected_cols.get(sheet_name, []))
+            
         return df.astype(str)
-    except Exception:
-        # 연결 실패 시 빈 깡통 반환
+    except:
+        # 연결 에러 시 빈 DF 반환
         return pd.DataFrame()
 
 def save_data(sheet_name, df):
@@ -52,7 +63,7 @@ def save_data(sheet_name, df):
         conn.update(worksheet=sheet_name, data=df)
         st.cache_data.clear()
     except Exception as e:
-        st.error(f"저장 중 오류가 발생했습니다: {e}")
+        st.error(f"저장 실패: {e}")
 
 def add_log(action, user, details):
     try:
@@ -63,14 +74,10 @@ def add_log(action, user, details):
             'user': user,
             'details': details
         }])
-        # 빈 데이터프레임일 경우 concat 에러 방지
-        if df_log.empty:
-            df_log = new_log
-        else:
-            df_log = pd.concat([df_log, new_log], ignore_index=True)
+        if df_log.empty: df_log = new_log
+        else: df_log = pd.concat([df_log, new_log], ignore_index=True)
         save_data('logs', df_log)
-    except:
-        pass # 로그 저장 실패로 메인 기능이 멈추지 않게 함
+    except: pass
 
 def parse_time(time_str):
     if not time_str or len(time_str) != 4 or not time_str.isdigit(): return None
@@ -93,7 +100,6 @@ def check_overlap(df, date_str, eq_name, start_time, end_time, exclude_id=None):
     if 'start_time' in df_check.columns:
         df_check['start_time'] = df_check['start_time'].astype(str).str.slice(0, 5)
         df_check['end_time'] = df_check['end_time'].astype(str).str.slice(0, 5)
-        
         same_day = df_check[(df_check['date'] == date_str) & (df_check['equipment'] == eq_name)]
         for idx, row in same_day.iterrows():
             if (row['start_time'] < end_time) and (row['end_time'] > start_time):
@@ -125,7 +131,6 @@ def batch_rename(target_type, old_name, new_name):
 try:
     df_labs_list = load_data('labs')
     LABS = df_labs_list['name'].tolist() if not df_labs_list.empty else []
-    
     df_eq_list = load_data('equipment')
     EQUIPMENT = df_eq_list['name'].tolist() if not df_eq_list.empty else []
     
@@ -145,11 +150,10 @@ tab1, tab2, tab3, tab4 = st.tabs(["📅 예약 하기", "📊 전체 타임라�
 # --- [TAB 1] 기기 예약 ---
 with tab1:
     if not LABS or not EQUIPMENT:
-        st.warning("⚠️ 초기 설정 중입니다. 랩/기기 목록이 없습니다.")
-        st.info("관리자 모드에서 랩과 기기를 먼저 추가해주세요.")
+        st.warning("⚠️ 초기 설정 중입니다.")
+        st.info("상단 탭 맨 오른쪽 '👮 관리자 모드'에서 랩/기기를 등록해주세요.")
     else:
         col1, col2 = st.columns([1, 1.2])
-        
         with col1:
             st.subheader("📝 새 예약 작성")
             user_name = st.text_input("사용자 이름", placeholder="예: 홍길동")
@@ -157,11 +161,9 @@ with tab1:
             st.divider()
             date = st.date_input("날짜 선택", datetime.now())
             eq_name = st.selectbox("사용 기기", EQUIPMENT)
-            
             st.write("---")
             st.write("⏱️ **시간 입력** (예: 1330)")
             st.info("🌙 **오버나이트 예약:** 2300 ~ 0300 입력 시 자동 처리됩니다.")
-            
             c1, c2 = st.columns(2)
             s_str = c1.text_input("시작 시간", placeholder="0900", max_chars=4)
             e_str = c2.text_input("종료 시간", placeholder="1000", max_chars=4)
@@ -202,11 +204,9 @@ with tab1:
 
         with col2:
             df_cur = load_data('bookings')
-            if not df_cur.empty: 
-                df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
+            if not df_cur.empty: df_cur = df_cur[(df_cur['date'] == str(date)) & (df_cur['equipment'] == eq_name)]
             
             st.markdown(f"### 📊 {date} <br> {eq_name} 점유 현황", unsafe_allow_html=True)
-            
             chart_df = pd.DataFrame(columns=['Start', 'End', 'user_name', 'lab'])
             if not df_cur.empty:
                 chart_df = df_cur.copy()
@@ -218,7 +218,6 @@ with tab1:
 
             dom_s = pd.to_datetime(f"{date} 00:00:00")
             dom_e = pd.to_datetime(f"{date} 23:59:59")
-            
             timeline = alt.Chart(chart_df).mark_bar(cornerRadius=5).encode(
                 x=alt.X('user_name', title='예약자'),
                 y=alt.Y('Start', scale=alt.Scale(domain=[dom_s, dom_e]), axis=alt.Axis(format='%H:%M', tickCount=24), title='시간'),
@@ -229,7 +228,6 @@ with tab1:
 
             st.divider()
             st.subheader(f"🔧 예약 관리 ({eq_name})")
-            
             df_bk = load_data('bookings')
             if not df_bk.empty:
                 df_bk = df_bk[df_bk['equipment'] == eq_name]
@@ -268,14 +266,12 @@ with tab2:
     ds = pd.to_datetime(f"{td} 00:00:00")
     de = pd.to_datetime(f"{td} 23:59:59")
     
-    if not df_v.empty: 
-        df_v = df_v[df_v['date'] == str(td)]
+    if not df_v.empty: df_v = df_v[df_v['date'] == str(td)]
     
     if not df_v.empty:
         df_v['viz_end'] = df_v['end_time'].replace("24:00", "23:59")
         df_v['start_dt'] = pd.to_datetime(df_v['date'].astype(str) + ' ' + df_v['start_time'], format='%Y-%m-%d %H:%M')
         df_v['end_dt'] = pd.to_datetime(df_v['date'].astype(str) + ' ' + df_v['viz_end'], format='%Y-%m-%d %H:%M')
-        
         ch = alt.Chart(df_v).mark_bar().encode(
             x=alt.X('start_dt', scale=alt.Scale(domain=[ds, de]), axis=alt.Axis(format='%H:%M', tickCount=24), title='시간'),
             x2='end_dt', y='equipment', color=alt.Color('lab', scale=lab_scale),
@@ -294,7 +290,6 @@ with tab2:
             if not dfs.empty:
                 dfs['dur'] = dfs.apply(lambda x: calculate_hours(x['start_time'], x['end_time']), axis=1)
                 dfs['mon'] = pd.to_datetime(dfs['date']).dt.strftime('%Y-%m')
-                
                 sc1, sc2 = st.columns(2)
                 with sc1:
                     cm = datetime.now().strftime('%Y-%m')
@@ -369,6 +364,7 @@ with tab3:
 # --- [TAB 4] 관리자 모드 ---
 with tab4:
     st.subheader("👮 관리자 페이지")
+    # [비밀번호] Secrets 혹은 하드코딩된 값과 비교
     if st.text_input("관리자 비밀번호", type="password") == ADMIN_PASSWORD:
         st.success("접속 승인")
         at1, at2, at3, at4 = st.tabs(["⚙️설정", "📅예약", "💧3차수", "📜로그"])
